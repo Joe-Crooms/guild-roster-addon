@@ -1,0 +1,6 @@
+## Interface: 30300
+## Title: Guild Roster Logger
+## Notes: Logs guild join/leave/rank-change events with dates for export.
+## Author: Joe
+## SavedVariables: GuildRosterLoggerDB
+GuildRosterLogger.lua
