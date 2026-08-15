@@ -24,7 +24,12 @@
 // nobody is logged in to run the addon.
 //
 // Usage:
-//   node watch-and-import.js "C:\path\to\WTF\Account\ACCOUNTNAME\SavedVariables\GuildRosterLogger.lua"
+//   node watch-and-import.js "C:\path\to\WTF\Account\ACCOUNTNAME\SavedVariables\GuildRosterLogger.lua" [second path] [third path] ...
+//
+// Pass more than one path if an officer raids on characters split across
+// multiple separate WoW accounts (each account has its own
+// WTF\Account\<NAME>\SavedVariables\ folder) — one watcher instance/scheduled
+// task then covers all of them, each tracked and debounced independently.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_KEY (anon/public key — see
 // schema-officer-import-rls.sql in the private companion repo)
@@ -37,10 +42,10 @@ import { spawn } from "child_process";
 import { updateScripts, restartWatcher } from "./update-scripts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const filePath = process.argv[2];
+const filePaths = process.argv.slice(2);
 
-if (!filePath) {
-  console.error("Usage: node watch-and-import.js path/to/GuildRosterLogger.lua");
+if (filePaths.length === 0) {
+  console.error("Usage: node watch-and-import.js path/to/GuildRosterLogger.lua [path2] [path3] ...");
   process.exit(1);
 }
 
@@ -48,7 +53,7 @@ const DEBOUNCE_MS = 3000; // WoW can write the file in bursts; wait for it to se
 const FILE_WAIT_POLL_MS = 5000;
 const SCRIPT_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
-function runImporter(script) {
+function runImporter(script, filePath) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, script), filePath], {
       stdio: "inherit",
@@ -56,7 +61,7 @@ function runImporter(script) {
     });
     child.on("exit", (code) => {
       if (code !== 0) {
-        console.error(`${script} exited with code ${code}`);
+        console.error(`${script} exited with code ${code} (${filePath})`);
       }
       resolve();
     });
@@ -67,31 +72,33 @@ function runImporter(script) {
   });
 }
 
-let timer = null;
-let running = false;
-let rerunQueued = false;
+// Each watched path gets its own debounce/running state so one account's
+// SavedVariables changing doesn't delay or skip another account's import.
+const watchState = new Map(filePaths.map((p) => [p, { timer: null, running: false, rerunQueued: false }]));
 
-async function importAll() {
-  if (running) {
-    rerunQueued = true;
+async function importAll(filePath) {
+  const state = watchState.get(filePath);
+  if (state.running) {
+    state.rerunQueued = true;
     return;
   }
-  running = true;
+  state.running = true;
   const stamp = new Date().toLocaleTimeString();
-  console.log(`\n[${stamp}] SavedVariables changed — importing...`);
-  await runImporter("import-grl-log.js");
-  await runImporter("import-raid-log.js");
-  console.log(`[${stamp}] Done. Watching for the next change...`);
-  running = false;
-  if (rerunQueued) {
-    rerunQueued = false;
-    scheduleImport();
+  console.log(`\n[${stamp}] ${filePath} changed — importing...`);
+  await runImporter("import-grl-log.js", filePath);
+  await runImporter("import-raid-log.js", filePath);
+  console.log(`[${stamp}] Done with ${filePath}. Watching for the next change...`);
+  state.running = false;
+  if (state.rerunQueued) {
+    state.rerunQueued = false;
+    scheduleImport(filePath);
   }
 }
 
-function scheduleImport() {
-  clearTimeout(timer);
-  timer = setTimeout(importAll, DEBOUNCE_MS);
+function scheduleImport(filePath) {
+  const state = watchState.get(filePath);
+  clearTimeout(state.timer);
+  state.timer = setTimeout(() => importAll(filePath), DEBOUNCE_MS);
 }
 
 async function waitForFile(p) {
@@ -114,20 +121,26 @@ async function main() {
     return false;
   });
   if (scriptsUpdated) {
-    restartWatcher(filePath);
+    restartWatcher(filePaths);
     return; // unreachable after process.exit(0) in restartWatcher, but keeps intent clear
   }
 
-  await waitForFile(filePath);
+  await Promise.all(filePaths.map(waitForFile));
 
-  console.log(`Watching ${filePath} for changes. Press Ctrl+C to stop.`);
-  fs.watch(filePath, { persistent: true }, () => {
-    scheduleImport();
-  });
-
-  // Run once immediately on startup too, so you don't have to wait for the
-  // next in-game change to pick up anything logged since this last ran.
-  scheduleImport();
+  console.log(
+    filePaths.length === 1
+      ? `Watching ${filePaths[0]} for changes. Press Ctrl+C to stop.`
+      : `Watching ${filePaths.length} SavedVariables files for changes. Press Ctrl+C to stop.`
+  );
+  for (const filePath of filePaths) {
+    if (filePaths.length > 1) console.log(`  - ${filePath}`);
+    fs.watch(filePath, { persistent: true }, () => {
+      scheduleImport(filePath);
+    });
+    // Run once immediately on startup too, so you don't have to wait for the
+    // next in-game change to pick up anything logged since this last ran.
+    scheduleImport(filePath);
+  }
 
   // Keep checking for script updates going forward too — same logic as the
   // startup check above, just riding along on this already-scheduled task
@@ -137,7 +150,7 @@ async function main() {
       console.error("[update-scripts] error:", err.message);
       return false;
     });
-    if (updated) restartWatcher(filePath);
+    if (updated) restartWatcher(filePaths);
   }, SCRIPT_UPDATE_INTERVAL_MS);
 }
 

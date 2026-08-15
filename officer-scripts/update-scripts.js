@@ -15,9 +15,9 @@
 // from Joe), same as today. In practice fixes/features land in the .js files
 // above, which this does cover automatically.
 //
-// Usage: node update-scripts.js "C:\path\to\...\SavedVariables\GuildRosterLogger.lua"
-// (the SavedVariables path is only forwarded to the respawned watcher, not
-// used for anything else here)
+// Usage: node update-scripts.js "C:\path\to\...\SavedVariables\GuildRosterLogger.lua" [path2] ...
+// (the SavedVariables path(s) are only forwarded to the respawned watcher,
+// not used for anything else here)
 
 import fs from "fs";
 import path from "path";
@@ -71,9 +71,9 @@ export async function updateScripts() {
 // Respawns watch-and-import.js as a fresh, detached process (picking up
 // whatever just got written to disk) and exits this one. Called by
 // watch-and-import.js itself after a successful update.
-export function restartWatcher(savedVarsPath) {
+export function restartWatcher(savedVarsPaths) {
   console.log("[update-scripts] Restarting to apply update...");
-  const child = spawn(process.execPath, [path.join(__dirname, "watch-and-import.js"), savedVarsPath], {
+  const child = spawn(process.execPath, [path.join(__dirname, "watch-and-import.js"), ...savedVarsPaths], {
     detached: true,
     stdio: "ignore",
     cwd: __dirname,
