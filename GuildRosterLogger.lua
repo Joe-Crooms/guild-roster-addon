@@ -65,23 +65,6 @@
 -- Caveat: this only sees what YOU (the addon holder) see. If you leave the
 -- raid before it actually disbands, the session ends from the addon's
 -- perspective even though the raid continues without you.
---
---
--- Periodic auto-reload
---
--- SavedVariables only ever hit disk on /reload or logout - there's no
--- live/streaming save in this client. Left alone, that means two things can
--- sit stale for a whole play session: a join/leave the server never bothers
--- pushing us an update for (Warmane doesn't always send GUILD_ROSTER_UPDATE
--- for someone else's membership change), and raid attendance/loot, which is
--- only ever captured in memory as it happens. So roughly every 5 minutes
--- (AUTO_RELOAD_INTERVAL) this addon reloads the UI on its own: that flushes
--- everything to disk for watch.bat to pick up, and - since PLAYER_LOGIN
--- fires again on reload just like a fresh login - forces a full roster
--- re-fetch too, so a join nobody pushed us gets noticed within one interval
--- instead of sitting unseen until you happen to /reload yourself. Deferred
--- until you're out of combat (never interrupts a pull), and skipped
--- entirely while you're not in the tracked guild.
 
 local ADDON_NAME = "GuildRosterLogger"
 
@@ -139,7 +122,7 @@ local function InitDB()
 end
 
 local function LogEvent(name, event, detail)
-    local entry = string.format("%s|%s|%s|%s", date("%Y-%m-%d"), name, event, detail or "")
+    local entry = string.format("%s|%s|%s|%s", date("%Y-%m-%d %H:%M:%S"), name, event, detail or "")
     table.insert(GuildRosterLoggerDB.changeLog, entry)
 end
 
@@ -465,40 +448,6 @@ local function HandleLootMessage(msg)
 
     LogRaidEvent(session.id, "raid_loot", winner, itemId .. ":" .. itemName .. ":" .. quality)
 end
-
--- Seconds between forced UI reloads (see "Periodic auto-reload" above).
-local AUTO_RELOAD_INTERVAL = 300 -- 5 minutes
-local autoReloadElapsed = 0
-local autoReloadPending = false
-
-local function DoAutoReload()
-    if not IsTrackedGuild() then
-        return
-    end
-    if InCombatLockdown() then
-        -- Try again the moment combat ends instead of waiting out the rest
-        -- of a possibly much longer fight.
-        autoReloadPending = true
-        return
-    end
-    autoReloadPending = false
-    ReloadUI()
-end
-
-local autoReloadFrame = CreateFrame("Frame")
-autoReloadFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
-autoReloadFrame:SetScript("OnEvent", function()
-    if autoReloadPending then
-        DoAutoReload()
-    end
-end)
-autoReloadFrame:SetScript("OnUpdate", function(self, elapsed)
-    autoReloadElapsed = autoReloadElapsed + elapsed
-    if autoReloadElapsed >= AUTO_RELOAD_INTERVAL then
-        autoReloadElapsed = 0
-        DoAutoReload()
-    end
-end)
 
 -- ============================================================
 

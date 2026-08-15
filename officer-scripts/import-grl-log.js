@@ -5,8 +5,10 @@
 // step needed in-game, just point this at the .lua file on disk.
 //
 // The addon logs each event as a plain string:
-//   "YYYY-MM-DD|CharacterName|event|detail"
-// e.g. "2026-08-10|Thundermace|rank_change|Member->Officer"
+//   "YYYY-MM-DD HH:MM:SS|CharacterName|event|detail"
+// e.g. "2026-08-10 20:14:03|Thundermace|rank_change|Member->Officer"
+// (Older entries logged before this format landed are date-only, "YYYY-MM-DD"
+// with no time — extractEvents() below matches both.)
 //
 // This script pulls every matching string out of the file with a regex
 // (deliberately not a full Lua parser — the addon's log format was designed
@@ -61,10 +63,12 @@ if (!filePath) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 function extractEvents(content) {
-  // Matches every quoted "YYYY-MM-DD|Name|event|detail" string anywhere in
-  // the file, regardless of how Blizzard's Lua serializer nested/indexed
-  // the surrounding table.
-  const matches = [...content.matchAll(/"(\d{4}-\d{2}-\d{2}\|[^"]*)"/g)];
+  // Matches every quoted "YYYY-MM-DD[ HH:MM:SS]|Name|event|detail" string
+  // anywhere in the file, regardless of how Blizzard's Lua serializer
+  // nested/indexed the surrounding table. The time portion is optional so
+  // older date-only entries (logged before GuildRosterLogger.lua started
+  // including a timestamp) still match.
+  const matches = [...content.matchAll(/"(\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?\|[^"]*)"/g)];
   return matches.map((m) => {
     const [date, name, event, detail] = m[1].split("|");
     return { date, name, event, detail, raw: m[1] };
