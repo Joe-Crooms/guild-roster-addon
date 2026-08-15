@@ -17,12 +17,17 @@
 // last_seen/left_date directly — this is what lets an online officer's
 // client report a join or leave the moment they see it, instead of waiting
 // for poll-roster.js's next scheduled Warmane armory poll. Both write the
-// same columns with the same meaning (see syncRoster() in poll-roster.js),
-// so whichever last observed reality just wins; a first_seen trigger in
-// schema-officer-membership-rls.sql stops either side from ever moving a
-// character's original join date backwards. poll-roster.js keeps running on
-// its own schedule regardless — it's still what catches joins/leaves when
-// nobody with the addon happens to be logged in.
+// same columns with the same meaning (see syncRoster() in poll-roster.js).
+// If several officers each run their own independent watcher, whichever
+// import has the most recent observed date wins, not just whichever import
+// happened to run last — a straggling officer whose SavedVariables file
+// hasn't seen new activity in a while can't overwrite a fresher read from
+// someone else's more recent import (see the knownDate check in main()
+// below). A first_seen trigger in schema-officer-membership-rls.sql also
+// stops any of this from ever moving a character's original join date
+// backwards. poll-roster.js keeps running on its own schedule regardless —
+// it's still what catches joins/leaves when nobody with the addon happens to
+// be logged in.
 //
 // The file also holds GuildRosterLoggerDB.members[name] = { rank, status,
 // note, officernote }, a nested (not pipe-delimited) table of each
@@ -132,16 +137,33 @@ async function main() {
   if (membershipByName.size) {
     const { data: existingMembers, error: memberErr } = await supabase
       .from("guild_members")
-      .select("character_name, status");
+      .select("character_name, status, last_seen, left_date");
     if (memberErr) throw memberErr;
-    const statusByName = new Map(existingMembers.map((r) => [r.character_name, r.status]));
+    const memberByName = new Map(existingMembers.map((r) => [r.character_name, r]));
 
     const toInsert = [];
     const toActivate = [];
     const toLeave = [];
+    let staleSkipped = 0;
 
     for (const [name, { event, date }] of membershipByName) {
-      const status = statusByName.get(name);
+      const existing = memberByName.get(name);
+      const status = existing?.status;
+
+      // If another officer's import (or poll-roster.js) has already recorded
+      // something more recent than this event, this is a straggling watcher
+      // re-reading an old changeLog entry (e.g. an officer who hasn't logged
+      // in for a while) — skip it rather than stomping a fresher, correct
+      // read with stale data. Without this, two officers running independent
+      // watchers could otherwise flip a member back and forth depending only
+      // on whose import happened to run last.
+      const knownDates = existing ? [existing.last_seen, existing.left_date].filter(Boolean) : [];
+      const knownDate = knownDates.length ? knownDates.reduce((a, b) => (a > b ? a : b)) : null;
+      if (knownDate && date < knownDate) {
+        staleSkipped++;
+        continue;
+      }
+
       if (event === "left") {
         // Nothing to mark left if we've never tracked them — poll-roster.js
         // (or a future "joined" event) will pick them up properly instead.
@@ -155,6 +177,9 @@ async function main() {
         // active, just bump last_seen". Same update either way.
         toActivate.push({ character_name: name, last_seen: date });
       }
+    }
+    if (staleSkipped) {
+      console.log(`Skipped ${staleSkipped} stale membership event(s) — a fresher read already exists.`);
     }
 
     if (toInsert.length) {
