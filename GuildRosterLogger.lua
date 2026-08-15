@@ -271,12 +271,45 @@ local function EndRaidSession()
     GuildRosterLoggerDB.currentRaidSession = nil
 end
 
+-- Ask before logging a brand-new raid. nil = undecided, true/false = answered
+-- for the raid currently forming. Reset whenever the raid ends (or stops
+-- qualifying) so the next one asks again.
+--
+-- Note: this choice lives in memory only, not SavedVariables - a /reload
+-- while still sitting in a raid you said "No" to will ask again, rather
+-- than silently staying opted out forever.
+local raidConsent = nil
+local raidConsentPopupShown = false
+
+-- Forward-declared so OnAccept below (defined before SyncRaidRoster's body)
+-- closes over this same local rather than falling back to a global lookup.
+local SyncRaidRoster
+
+StaticPopupDialogs["GRL_RAID_CONSENT"] = {
+    text = "GuildRosterLogger: record this raid's attendance and loot for the guild?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function()
+        raidConsent = true
+        raidConsentPopupShown = false
+        SyncRaidRoster()
+    end,
+    OnCancel = function()
+        raidConsent = false
+        raidConsentPopupShown = false
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
 -- Diffs the current raid roster against the active session's last-known
 -- roster to detect joins/leaves, and opens/closes the session itself on the
 -- 0<->N transitions. Safe to call on every RAID_ROSTER_UPDATE, and also on
 -- login/reload to pick up (or cleanly close) a session that was already in
 -- progress.
-local function SyncRaidRoster()
+SyncRaidRoster = function()
     if not IsTrackedGuild() then
         -- Not in Guardians of Justice - if we happen to have a session open
         -- from before a guild change, close it out cleanly rather than
@@ -284,6 +317,8 @@ local function SyncRaidRoster()
         if GuildRosterLoggerDB.currentRaidSession then
             EndRaidSession()
         end
+        raidConsent = nil
+        raidConsentPopupShown = false
         return
     end
 
@@ -298,10 +333,27 @@ local function SyncRaidRoster()
         if GuildRosterLoggerDB.currentRaidSession then
             EndRaidSession()
         end
+        -- Raid's over (or no longer qualifies) - next one starts fresh and
+        -- asks again.
+        raidConsent = nil
+        raidConsentPopupShown = false
         return
     end
 
     if not GuildRosterLoggerDB.currentRaidSession then
+        -- Brand new raid forming - ask before logging anything about it. A
+        -- session already in progress (this login, or carried over across a
+        -- /reload) is never re-asked about; only a fresh one is.
+        if raidConsent == nil then
+            if not raidConsentPopupShown then
+                raidConsentPopupShown = true
+                StaticPopup_Show("GRL_RAID_CONSENT")
+            end
+            return
+        end
+        if raidConsent == false then
+            return
+        end
         StartRaidSession()
     end
 
