@@ -13,10 +13,16 @@
 // to be this easy to extract), then imports rank_change and joined events
 // into guild_rank_history and updates current_rank on guild_members.
 //
-// Join/leave/rejoin events from this source are intentionally NOT written
-// to guild_members' status/first_seen/last_seen — poll-roster.js (via the
-// Warmane API) is the source of truth for that, since it runs continuously
-// in the background rather than only while you're logged in.
+// joined/rejoined/left events also update guild_members' status/first_seen/
+// last_seen/left_date directly — this is what lets an online officer's
+// client report a join or leave the moment they see it, instead of waiting
+// for poll-roster.js's next scheduled Warmane armory poll. Both write the
+// same columns with the same meaning (see syncRoster() in poll-roster.js),
+// so whichever last observed reality just wins; a first_seen trigger in
+// schema-officer-membership-rls.sql stops either side from ever moving a
+// character's original join date backwards. poll-roster.js keeps running on
+// its own schedule regardless — it's still what catches joins/leaves when
+// nobody with the addon happens to be logged in.
 //
 // The file also holds GuildRosterLoggerDB.members[name] = { rank, status,
 // note, officernote }, a nested (not pipe-delimited) table of each
@@ -108,9 +114,73 @@ async function main() {
   const rankEvents = events.filter(
     (e) => e.event === "rank_change" || e.event === "joined"
   );
-  const skipped = events.length - rankEvents.length;
-  if (skipped) {
-    console.log(`Skipping ${skipped} join/leave/rejoin events (handled by poll-roster.js instead).`);
+
+  // Latest joined/rejoined/left per character — the addon's changeLog holds
+  // full history, so on every run this reflects whatever this officer's
+  // client most recently witnessed, no matter how much piled up between
+  // imports.
+  const membershipByName = new Map();
+  for (const e of events) {
+    if (e.event !== "joined" && e.event !== "rejoined" && e.event !== "left") continue;
+    const existing = membershipByName.get(e.name);
+    if (!existing || e.date >= existing.date) {
+      membershipByName.set(e.name, { event: e.event, date: e.date });
+    }
+  }
+
+  let membershipSummary = "no membership changes";
+  if (membershipByName.size) {
+    const { data: existingMembers, error: memberErr } = await supabase
+      .from("guild_members")
+      .select("character_name, status");
+    if (memberErr) throw memberErr;
+    const statusByName = new Map(existingMembers.map((r) => [r.character_name, r.status]));
+
+    const toInsert = [];
+    const toActivate = [];
+    const toLeave = [];
+
+    for (const [name, { event, date }] of membershipByName) {
+      const status = statusByName.get(name);
+      if (event === "left") {
+        // Nothing to mark left if we've never tracked them — poll-roster.js
+        // (or a future "joined" event) will pick them up properly instead.
+        if (status !== undefined && status !== "left") {
+          toLeave.push({ character_name: name, left_date: date });
+        }
+      } else if (status === undefined) {
+        toInsert.push({ character_name: name, first_seen: date, last_seen: date, status: "active" });
+      } else {
+        // Already tracked — covers both "was left, now back" and "already
+        // active, just bump last_seen". Same update either way.
+        toActivate.push({ character_name: name, last_seen: date });
+      }
+    }
+
+    if (toInsert.length) {
+      const { error } = await supabase.from("guild_members").insert(toInsert);
+      if (error) throw error;
+      console.log(`New members (witnessed live): ${toInsert.map((m) => m.character_name).join(", ")}`);
+    }
+    for (const { character_name, last_seen } of toActivate) {
+      const { error } = await supabase
+        .from("guild_members")
+        .update({ status: "active", last_seen, left_date: null })
+        .eq("character_name", character_name);
+      if (error) console.warn(`Could not activate ${character_name}:`, error.message);
+    }
+    for (const { character_name, left_date } of toLeave) {
+      const { error } = await supabase
+        .from("guild_members")
+        .update({ status: "left", left_date })
+        .eq("character_name", character_name);
+      if (error) console.warn(`Could not mark ${character_name} left:`, error.message);
+    }
+
+    if (toInsert.length || toActivate.length || toLeave.length) {
+      membershipSummary = `${toInsert.length} new, ${toActivate.length} (re)activated, ${toLeave.length} left`;
+    }
+    console.log(`Membership sync: ${membershipSummary}.`);
   }
 
   let rankSummary;
@@ -201,7 +271,7 @@ async function main() {
 
   console.log(`Updated rank/notes for ${updated} members.`);
 
-  const summary = `Imported ${rankSummary}, updated rank/notes for ${updated} member(s).`;
+  const summary = `Imported ${rankSummary}, updated rank/notes for ${updated} member(s), membership sync: ${membershipSummary}.`;
   await logSync(supabase, "import-grl-log", { success: true, summary });
 }
 
