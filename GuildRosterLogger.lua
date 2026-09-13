@@ -211,6 +211,53 @@ local function RequestFullSync()
     return true
 end
 
+-- IsInGuild() can briefly report false for a few seconds right after
+-- login/reload, before the client has actually heard back from the server
+-- about guild membership - even for a genuine, longtime member. RequestFullSync()
+-- (via IsTrackedGuild()) treats that identically to actually being in the
+-- wrong guild, which made /grlog unreliable if run right after a /reload -
+-- exactly when someone doing a manual sync is most likely to run it. So
+-- /grlog itself retries quietly for a few seconds before giving up, rather
+-- than failing immediately on what's usually just a startup race.
+local MANUAL_SYNC_MAX_WAIT = 10
+local manualSyncFrame = CreateFrame("Frame")
+local manualSyncElapsed = nil
+
+local function StopManualSyncRetry()
+    manualSyncFrame:SetScript("OnUpdate", nil)
+    manualSyncElapsed = nil
+end
+
+local function TryManualSync()
+    if RequestFullSync() then
+        StopManualSyncRetry()
+        print("|cff33ff99GuildRosterLogger:|r Requested a full roster sync (including offline members). It'll be logged as soon as the server responds.")
+        return
+    end
+
+    if IsInGuild() then
+        -- Genuinely in a guild, just not the tracked one - IsTrackedGuild()
+        -- already printed which one via its own warning. Retrying won't
+        -- change that, so stop here instead of polling for 10 seconds for
+        -- nothing.
+        StopManualSyncRetry()
+        print("|cff33ff99GuildRosterLogger:|r Not tracking - you're not currently in \"" .. EXPECTED_GUILD_NAME .. "\", so nothing was synced.")
+        return
+    end
+
+    manualSyncElapsed = manualSyncElapsed or 0
+    if manualSyncElapsed >= MANUAL_SYNC_MAX_WAIT then
+        StopManualSyncRetry()
+        print("|cff33ff99GuildRosterLogger:|r Not tracking - you don't appear to be in a guild, so nothing was synced.")
+        return
+    end
+
+    manualSyncFrame:SetScript("OnUpdate", function(self, elapsed)
+        manualSyncElapsed = manualSyncElapsed + elapsed
+        TryManualSync()
+    end)
+end
+
 -- Seconds to wait after a detected join/leave before doing the automatic
 -- full resync. 3.3.5a has no C_Timer, so this is a plain elapsed-time
 -- countdown driven by an OnUpdate script (only attached while a resync is
@@ -586,13 +633,10 @@ end)
 
 SLASH_GRLOG1 = "/grlog"
 SlashCmdList["GRLOG"] = function()
-    -- RequestFullSync() silently does nothing if IsTrackedGuild() is false
-    -- (wrong guild, or not in a guild at all) - only claim success when a
-    -- sync was actually requested, instead of always printing the reassuring
-    -- message regardless of whether anything happened.
-    if RequestFullSync() then
-        print("|cff33ff99GuildRosterLogger:|r Requested a full roster sync (including offline members). It'll be logged as soon as the server responds.")
-    else
-        print("|cff33ff99GuildRosterLogger:|r Not tracking - you're not currently in \"" .. EXPECTED_GUILD_NAME .. "\", so nothing was synced.")
-    end
+    -- TryManualSync() retries for a few seconds if it looks like guild info
+    -- just hasn't loaded yet (see comment above it) before reporting
+    -- failure, instead of RequestFullSync() silently doing nothing on a
+    -- transient startup race and immediately claiming there's nothing to
+    -- sync.
+    TryManualSync()
 end
