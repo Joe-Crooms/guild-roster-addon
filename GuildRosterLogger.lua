@@ -197,13 +197,18 @@ end
 -- Forces a one-time full roster fetch (including offline members) then
 -- reverts the "Show Offline Members" flag back off once the data arrives,
 -- so we don't leave the player's guild UI stuck showing offline members.
+-- Returns whether a sync was actually requested (false if not currently in
+-- the tracked guild) - callers that give player feedback need to know this,
+-- since silently doing nothing and still claiming success is how ranks for
+-- anyone who's offline at the time can go missing indefinitely.
 local function RequestFullSync()
     if not IsTrackedGuild() then
-        return
+        return false
     end
     SetGuildRosterShowOffline(true)
     pendingOfflineRevert = true
     GuildRoster()
+    return true
 end
 
 -- Seconds to wait after a detected join/leave before doing the automatic
@@ -225,6 +230,38 @@ local function ScheduleAutoFullSync(triggerFrame)
             self:SetScript("OnUpdate", nil)
             autoSyncCountdown = nil
             RequestFullSync()
+        end
+    end)
+end
+
+-- Seconds to wait, after the last GUILD_ROSTER_UPDATE following a full sync
+-- request, before reverting "Show Offline Members" back off. GUILD_ROSTER_UPDATE
+-- can fire more than once for a single GuildRoster() call - e.g. an initial
+-- one with whatever's already cached (sometimes nothing at all, if this
+-- fires right after login before the server has pushed real roster data),
+-- followed later by the actual response. TakeSnapshot() runs on every one of
+-- these regardless, so it only gets more complete as real data arrives - but
+-- reverting the flag too early risked the *last* update landing after we'd
+-- already told the server we don't want offline members anymore, silently
+-- turning what looked like a full sync into an online-members-only one. That
+-- would make anyone offline at sync time simply never get their rank
+-- recorded, no matter how many times /grlog was run.
+local OFFLINE_REVERT_DELAY = 3
+local offlineRevertCountdown = nil
+local offlineRevertFrame = CreateFrame("Frame")
+
+-- Debounced the same way as ScheduleAutoFullSync: called every time
+-- GUILD_ROSTER_UPDATE fires while a revert is pending, restarting the
+-- countdown so a burst of updates only reverts once they've stopped.
+local function ScheduleOfflineRevert()
+    offlineRevertCountdown = OFFLINE_REVERT_DELAY
+    offlineRevertFrame:SetScript("OnUpdate", function(self, elapsed)
+        offlineRevertCountdown = offlineRevertCountdown - elapsed
+        if offlineRevertCountdown <= 0 then
+            self:SetScript("OnUpdate", nil)
+            offlineRevertCountdown = nil
+            pendingOfflineRevert = false
+            SetGuildRosterShowOffline(false)
         end
     end)
 end
@@ -526,11 +563,13 @@ frame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "GUILD_ROSTER_UPDATE" then
         local membershipChanged = TakeSnapshot()
         if pendingOfflineRevert then
-            -- This update is the response to our own full sync (manual
-            -- /grlog or an automatic one below) - just revert the offline
-            -- flag. Don't reschedule another auto-sync from our own sync.
-            pendingOfflineRevert = false
-            SetGuildRosterShowOffline(false)
+            -- This update is (part of) the response to our own full sync
+            -- (manual /grlog or an automatic one below). Don't revert the
+            -- offline flag immediately - restart the debounced countdown
+            -- instead, in case more updates for this same sync are still on
+            -- the way (see ScheduleOfflineRevert). Don't reschedule another
+            -- auto-sync from our own sync either.
+            ScheduleOfflineRevert()
         elseif membershipChanged then
             -- Someone joined/rejoined/left based on whatever's currently
             -- cached (which may only be online members). Schedule a full
@@ -547,6 +586,13 @@ end)
 
 SLASH_GRLOG1 = "/grlog"
 SlashCmdList["GRLOG"] = function()
-    RequestFullSync()
-    print("|cff33ff99GuildRosterLogger:|r Requested a full roster sync (including offline members). It'll be logged as soon as the server responds.")
+    -- RequestFullSync() silently does nothing if IsTrackedGuild() is false
+    -- (wrong guild, or not in a guild at all) - only claim success when a
+    -- sync was actually requested, instead of always printing the reassuring
+    -- message regardless of whether anything happened.
+    if RequestFullSync() then
+        print("|cff33ff99GuildRosterLogger:|r Requested a full roster sync (including offline members). It'll be logged as soon as the server responds.")
+    else
+        print("|cff33ff99GuildRosterLogger:|r Not tracking - you're not currently in \"" .. EXPECTED_GUILD_NAME .. "\", so nothing was synced.")
+    end
 end
