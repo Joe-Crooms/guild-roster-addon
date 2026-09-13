@@ -99,7 +99,13 @@ local function IsTrackedGuild()
         return false
     end
     local guildName = GetGuildInfo("player")
-    if guildName ~= EXPECTED_GUILD_NAME then
+    -- Compared case-insensitively: GetGuildInfo() can come back with
+    -- different capitalization than however EXPECTED_GUILD_NAME happens to
+    -- be typed here (observed directly: "Guardians Of Justice" from the API
+    -- vs "Guardians of Justice" here), and plain ~= treated that as a
+    -- completely different guild - silently blocking tracking for a real
+    -- member with the exact right guild, every single time.
+    if not guildName or guildName:lower() ~= EXPECTED_GUILD_NAME:lower() then
         if not warnedWrongGuild then
             warnedWrongGuild = true
             print(string.format(
