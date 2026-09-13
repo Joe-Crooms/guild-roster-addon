@@ -640,3 +640,16 @@ SlashCmdList["GRLOG"] = function()
     -- sync.
     TryManualSync()
 end
+
+-- Temporary diagnostic command: dumps exactly what the client thinks the
+-- guild state is, straight from the WoW API, instead of guessing at it from
+-- the guarded messages above. Safe to leave in - does nothing unless typed.
+SLASH_GRLOGDEBUG1 = "/grlogdebug"
+SlashCmdList["GRLOGDEBUG"] = function()
+    print(string.format(
+        "|cff33ff99GuildRosterLogger debug:|r IsInGuild()=%s  GetGuildInfo(\"player\")=%s  GetNumGuildMembers()=%s  warnedWrongGuild=%s",
+        tostring(IsInGuild()),
+        tostring(GetGuildInfo("player")),
+        tostring(GetNumGuildMembers and GetNumGuildMembers() or "n/a"),
+        tostring(warnedWrongGuild)))
+end
